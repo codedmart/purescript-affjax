@@ -1,12 +1,13 @@
 /* global exports */
 /* global XMLHttpRequest */
+/* global console */
 /* global module */
 "use strict";
 
 // module Network.HTTP.Affjax
 
-// jshint maxparams: 5
-exports._ajax = function (mkHeader, options, canceler, errback, callback) {
+// jshint maxparams: 6
+exports._ajax = function (mkHeader, options, progess, canceler, errback, callback) {
   var platformSpecific = { };
   if (typeof module !== "undefined" && module.require) {
     // We are on node.js
@@ -75,7 +76,41 @@ exports._ajax = function (mkHeader, options, canceler, errback, callback) {
     xhr.responseType = options.responseType;
     xhr.withCredentials = options.withCredentials;
     xhr.send(options.content);
-    return canceler(xhr);
+    return {
+      progress: progess(xhr),
+      canceler: canceler(xhr)
+    };
+  };
+};
+
+// jshint maxparams: 4
+exports._progressAjax = function (xhr, progressError, errback, callback) {
+  function onProgress(e) {
+    if (e.computableLength) {
+      console.log("onProgress", Math.floor(e.loaded / e.total * 100));
+      return callback(Math.floor(e.loaded / e.total * 100))();
+    }
+  }
+
+  function onLoadStart() {
+    console.log("onLoadStart", 0);
+    return callback(0)();
+  }
+
+  function onLoadEnd(e) {
+    console.log("onLoadEnd", e.loaded);
+    return callback(e.loaded)();
+  }
+
+  return function () {
+    if (typeof module !== "undefined" && module.require) {
+    } else {
+      var _xhr = xhr.upload ? xhr.upload : xhr;
+
+      _xhr.upload.onloadstart = onLoadStart;
+      _xhr.upload.onprogress = onProgress;
+      _xhr.upload.onloadend = onLoadEnd;
+    }
   };
 };
 
@@ -87,3 +122,36 @@ exports._cancelAjax = function (xhr, cancelError, errback, callback) {
   };
 };
 
+exports._makeAff = function (cb) {
+  return function (success, error) {
+    return cb(function (e) {
+      return function () {
+        error(e);
+      };
+    })(function (v) {
+      return function () {
+        try {
+          success(v);
+        } catch (e) {
+          error(e);
+        }
+      };
+    })();
+  };
+};
+
+exports._forkAff = function (nonSomething, aff) {
+  var voidF = function () {};
+
+  return function (success, error) {
+    var canceler = aff(voidF, voidF);
+
+    try {
+      success(canceler);
+    } catch (e) {
+      error(e);
+    }
+
+    return nonSomething;
+  };
+};

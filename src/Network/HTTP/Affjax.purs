@@ -4,8 +4,10 @@ module Network.HTTP.Affjax
   , AffjaxRequest(), defaultRequest
   , AffjaxResponse()
   , URL()
+  , Progress()
   , affjax
   , affjax'
+  , forkAff_
   , get
   , post, post_, post', post_'
   , put, put_, put', put_'
@@ -19,7 +21,7 @@ module Network.HTTP.Affjax
 import Prelude
 
 import Control.Bind ((<=<))
-import Control.Monad.Aff (Aff(), makeAff, makeAff', Canceler(..), attempt, later', forkAff, cancel)
+import Control.Monad.Aff (Aff(), makeAff, Canceler(..), attempt, later', forkAff, cancel)
 import Control.Monad.Aff.AVar (AVAR(), makeVar, takeVar, putVar)
 import Control.Monad.Eff (Eff())
 import Control.Monad.Eff.Class (liftEff)
@@ -31,7 +33,7 @@ import Data.Array as Arr
 import Data.Either (Either(..), either)
 import Data.Foldable (any)
 import Data.Foreign (Foreign(), F(), parseJSON, readString)
-import Data.Function (Fn5(), runFn5, Fn4(), runFn4, on)
+import Data.Function (Fn6(), runFn6, Fn4(), runFn4, Fn2(), runFn2, on)
 import Data.HTTP.Method (Method(..), CustomMethod())
 import Data.HTTP.Method as Method
 import Data.Int (toNumber, round)
@@ -84,12 +86,35 @@ type AffjaxResponse a =
   , response :: a
   }
 
+foreign import _makeAff :: forall e a. ((Error -> Eff e Unit) -> (a -> Eff e Unit) -> Eff e (Something e)) -> Aff e a
+
+foreign import _forkAff :: forall e a. Fn2 (Something e) (Aff e a) (Aff e (Something e))
+
+makeAff_ :: forall e a. ((Error -> Eff e Unit) -> (a -> Eff e Unit) -> Eff e (Something e)) -> Aff e a
+makeAff_ h = _makeAff h
+
+forkAff_ :: forall e a. Aff e a -> Aff e (Something e)
+forkAff_ aff = runFn2 _forkAff nonSomething aff
+
+nonSomething :: forall e. Something e
+nonSomething =
+  { progress: Progress (const (pure 0.0))
+  , canceler: Canceler (const (pure false))
+  }
+
+newtype Progress e = Progress (Error -> Aff e Number)
+
+type Something e =
+  { progress :: Progress e
+  , canceler :: Canceler e
+  }
+
 -- | Type alias for URL strings to aid readability of types.
 type URL = String
 
 -- | Makes an `Affjax` request.
 affjax :: forall e a b. (Requestable a, Respondable b) => AffjaxRequest a -> Affjax e b
-affjax = makeAff' <<< affjax'
+affjax = makeAff_ <<< affjax'
 
 -- | Makes a `GET` request to the specified URL.
 get :: forall e a. (Respondable a) => URL -> Affjax e a
@@ -215,11 +240,11 @@ affjax'
   :: forall e a b
    . (Requestable a, Respondable b)
   => AffjaxRequest a
-  -> (Error -> Eff (ajax :: AJAX | e) Unit)
-  -> (AffjaxResponse b -> Eff (ajax :: AJAX | e) Unit)
-  -> Eff (ajax :: AJAX | e) (Canceler (ajax :: AJAX | e))
+  -> (Error -> Eff e Unit)
+  -> (AffjaxResponse b -> Eff e Unit)
+  -> Eff e (Something e)
 affjax' req eb cb =
-  runFn5 _ajax responseHeader req' cancelAjax eb cb'
+  runFn6 _ajax responseHeader req' progressAjax cancelAjax eb cb'
   where
 
   req' :: AjaxRequest
@@ -253,7 +278,7 @@ affjax' req eb cb =
     Just h | not $ any (on eq requestHeaderName h) hs -> hs `Arr.snoc` h
     _ -> hs
 
-  cb' :: AffjaxResponse ResponseContent -> Eff (ajax :: AJAX | e) Unit
+  cb' :: AffjaxResponse ResponseContent -> Eff e Unit
   cb' res = case res { response = _  } <$> fromResponse' res.response of
     Left err -> eb $ error (show err)
     Right res' -> cb res'
@@ -275,20 +300,31 @@ type AjaxRequest =
   }
 
 foreign import _ajax
-  :: forall e. Fn5 (String -> String -> ResponseHeader)
+  :: forall e. Fn6 (String -> String -> ResponseHeader)
                AjaxRequest
-               (XMLHttpRequest -> Canceler (ajax :: AJAX | e))
-               (Error -> Eff (ajax :: AJAX | e) Unit)
-               (AffjaxResponse Foreign -> Eff (ajax :: AJAX | e) Unit)
-               (Eff (ajax :: AJAX | e) (Canceler (ajax :: AJAX | e)))
+               (XMLHttpRequest -> Progress e)
+               (XMLHttpRequest -> Canceler e)
+               (Error -> Eff e Unit)
+               (AffjaxResponse Foreign -> Eff e Unit)
+               (Eff e (Something e))
 
-cancelAjax :: forall e. XMLHttpRequest -> Canceler (ajax :: AJAX | e)
+progressAjax :: forall e. XMLHttpRequest -> Progress e
+progressAjax xhr = Progress \err -> makeAff (\eb cb -> runFn4 _progressAjax xhr err eb cb)
+
+foreign import _progressAjax
+  :: forall e. Fn4 XMLHttpRequest
+                   Error
+                   (Error -> Eff e Unit)
+                   (Number -> Eff e Unit)
+                   (Eff e Unit)
+
+cancelAjax :: forall e. XMLHttpRequest -> Canceler e
 cancelAjax xhr = Canceler \err -> makeAff (\eb cb -> runFn4 _cancelAjax xhr err eb cb)
 
 foreign import _cancelAjax
   :: forall e. Fn4 XMLHttpRequest
                    Error
-                   (Error -> Eff (ajax :: AJAX | e) Unit)
-                   (Boolean -> Eff (ajax :: AJAX | e) Unit)
-                   (Eff (ajax :: AJAX | e) Unit)
+                   (Error -> Eff e Unit)
+                   (Boolean -> Eff e Unit)
+                   (Eff e Unit)
 

@@ -118,6 +118,6 @@ main = runAff (\e -> print e >>= \_ -> throwException e) (const $ log "affjax: A
     -- assertEq (Just "test=test") (lookupHeader "Set-Cookie" res.headers)
 
   A.log "Testing cancellation"
-  canceler <- forkAff (post_ mirror "do it now")
-  canceled <- canceler `cancel` error "Pull the cord!"
+  p <- forkAff_ (post_ mirror "do it now")
+  canceled <- p.canceler `cancel` error "Pull the cord!"
   assertMsg "Should have been canceled" canceled
